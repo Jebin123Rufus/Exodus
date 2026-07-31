@@ -44,7 +44,7 @@ passport.use(
       clientID: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
       callbackURL: `${BASE_URL}/api/auth/github/callback`,
-      scope: ['user:email'],
+      scope: ['user:email', 'repo'],
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
@@ -125,13 +125,13 @@ async function startServer() {
         client: client,
         dbName: 'exodus',
         collectionName: 'sessions',
-        touchAfter: 24 * 3600, // only update session in DB once per day unless data changes
+        touchAfter: 24 * 3600,
       }),
       cookie: {
         secure: false,
         httpOnly: true,
         sameSite: 'lax',
-        maxAge: 24 * 60 * 60 * 1000, // 24 hours — expires on browser close if omitted, which can persist
+        maxAge: 24 * 60 * 60 * 1000,
       },
     })
   );
@@ -139,11 +139,9 @@ async function startServer() {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  // Force GitHub to show the login screen every time (prevents silent re-auth after logout)
   app.get(
     '/api/auth/github',
     (req, res, next) => {
-      // Regenerate session before starting OAuth to prevent session fixation
       req.session.regenerate((err) => {
         if (err) return next(err);
         next();
@@ -159,15 +157,10 @@ async function startServer() {
       session: true,
     }),
     (req, res) => {
-      // Regenerate the session after login to prevent session fixation.
-      // This is especially important after a switch-account flow where the
-      // old session was destroyed and a new OAuth login just completed.
       req.session.regenerate((err) => {
         if (err) {
           console.error('Session regeneration error after GitHub callback:', err);
-          // Still redirect to dashboard; Passport already set req.user
         }
-        // Re-save the logged-in user into the newly regenerated session
         req.session.passport = { user: req.user._id.toString() };
         req.session.save((saveErr) => {
           if (saveErr) console.error('Session save error after regeneration:', saveErr);
@@ -177,24 +170,17 @@ async function startServer() {
     }
   );
 
-  // Switch account: destroy existing session then start a fresh GitHub OAuth flow.
-  // Passing `prompt=select_account` (recognized by some IdPs) and an empty `login`
-  // param forces GitHub to display its login/account-picker UI instead of silently
-  // reusing the currently-active browser session.
   app.get('/api/auth/switch', (req, res, next) => {
     const sessionId = req.session?.id;
 
     const startOAuth = () => {
-      // `login=` (empty) clears GitHub's remembered account hint.
-      // GitHub does not officially support `prompt=`, but including it
-      // signals intent and may be honoured in future GitHub versions.
       const githubOAuthURL =
         `https://github.com/login/oauth/authorize` +
         `?client_id=${process.env.GITHUB_CLIENT_ID}` +
         `&redirect_uri=${encodeURIComponent(`${BASE_URL}/api/auth/github/callback`)}` +
-        `&scope=user%3Aemail` +
-        `&login=` +            // empty login hint forces account picker
-        `&prompt=select_account`; // belt-and-suspenders for future compatibility
+        `&scope=user%3Aemail%20repo` +
+        `&login=` +
+        `&prompt=select_account`;
       res.redirect(githubOAuthURL);
     };
 
@@ -261,6 +247,89 @@ async function startServer() {
 
   app.get('/api/message', (req, res) => {
     res.json({ message: 'Hello from the Express backend!' });
+  });
+
+  app.get('/api/repos', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+      const oauthAcc = await oauthAccounts.findOne({
+        userId: req.user._id,
+        provider: 'github',
+      });
+
+      if (!oauthAcc || !oauthAcc.accessToken) {
+        return res.status(400).json({ error: 'No GitHub access token found for user' });
+      }
+
+      const ghResponse = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated&type=all', {
+        headers: {
+          Authorization: `Bearer ${oauthAcc.accessToken}`,
+          'User-Agent': 'Exodus-App',
+          Accept: 'application/vnd.github.v3+json',
+        },
+      });
+
+      if (!ghResponse.ok) {
+        const errorText = await ghResponse.text();
+        console.error('GitHub API error:', ghResponse.status, errorText);
+        return res.status(ghResponse.status).json({ error: 'Failed to fetch repositories from GitHub' });
+      }
+
+      const repos = await ghResponse.json();
+
+      const formattedRepos = repos.map((repo) => ({
+        id: repo.id,
+        name: repo.name,
+        fullName: repo.full_name,
+        owner: {
+          login: repo.owner?.login,
+          avatarUrl: repo.owner?.avatar_url,
+          type: repo.owner?.type,
+        },
+        private: repo.private,
+        htmlUrl: repo.html_url,
+        cloneUrl: repo.clone_url,
+        sshUrl: repo.ssh_url,
+        defaultBranch: repo.default_branch,
+        language: repo.language || 'Unknown',
+        description: repo.description,
+        updatedAt: repo.updated_at,
+        stargazersCount: repo.stargazers_count,
+        forksCount: repo.forks_count,
+      }));
+
+      res.json({ success: true, repositories: formattedRepos });
+    } catch (err) {
+      console.error('Error fetching user repositories:', err);
+      res.status(500).json({ error: 'Internal server error while fetching repositories' });
+    }
+  });
+
+  app.post('/api/repos/submit', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { repoMetadata } = req.body;
+    if (!repoMetadata || !repoMetadata.fullName) {
+      return res.status(400).json({ error: 'Invalid repository metadata provided' });
+    }
+
+    console.log('Received repository metadata for Static Security Analysis:');
+    console.log(JSON.stringify(repoMetadata, null, 2));
+
+    res.json({
+      success: true,
+      message: `Metadata for repository "${repoMetadata.fullName}" successfully received for Static Security Analysis.`,
+      analysisId: `analysis_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      receivedMetadata: {
+        ...repoMetadata,
+        submittedAt: new Date().toISOString(),
+        submittedBy: req.user.username,
+      },
+    });
   });
 
   app.listen(PORT, () => {

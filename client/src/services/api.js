@@ -32,3 +32,34 @@ export async function logout() {
 
   return res.json();
 }
+
+export async function getUserRepositories() {
+  const res = await fetch(`${API_BASE}/api/repos`, {
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to fetch repositories');
+  }
+
+  return res.json();
+}
+
+export async function submitRepositoryMetadata(repoMetadata) {
+  const res = await fetch(`${API_BASE}/api/repos/submit`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ repoMetadata }),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to submit repository metadata');
+  }
+
+  return res.json();
+}

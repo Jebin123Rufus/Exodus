@@ -15,13 +15,11 @@ function App() {
         const data = await getCurrentUser();
         if (data.authenticated) {
           setUser(data.user);
-          // Ensure URL reflects dashboard when authenticated
           if (window.location.pathname !== '/dashboard') {
             window.history.replaceState({}, '', '/dashboard');
           }
         } else {
           setUser(null);
-          // Redirect away from /dashboard if not authenticated
           if (window.location.pathname === '/dashboard') {
             window.history.replaceState({}, '', '/');
           }
@@ -43,11 +41,9 @@ function App() {
   const handleLogout = async () => {
     try {
       await logout();
-      // Hard redirect — wipes all React state and forces a fresh /api/auth/user check
       window.location.replace('/');
     } catch (error) {
       console.error('Logout failed:', error);
-      // Force reload even on failure to ensure UI reflects logged-out state
       window.location.replace('/');
     }
   };
