@@ -8,6 +8,8 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.8",
+    "@babel/traverse": "^7.29.8",
     "connect-mongo": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -15,6 +17,7 @@
     "express-session": "^1.19.0",
     "groq-sdk": "^1.4.1",
     "ignore": "^7.0.6",
+    "js-tiktoken": "^1.0.21",
     "mongodb": "^7.5.0",
     "passport": "^0.7.0",
     "passport-github2": "^0.1.12"

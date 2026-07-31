@@ -8,6 +8,8 @@ import { Strategy as GitHubStrategy } from 'passport-github2';
 import { MongoClient, ObjectId } from 'mongodb';
 import Groq from 'groq-sdk';
 import ignore from 'ignore';
+import { SemanticChunkingService } from './src/chunking/semanticChunkingService.js';
+import { EvidenceExtractionService } from './src/evidence/evidenceExtractionService.js';
 
 dotenv.config();
 
@@ -29,6 +31,8 @@ let db;
 let users;
 let oauthAccounts;
 let analysisResults; // Collection to store the extracted files output
+let semanticChunks; // Collection to store generated semantic chunks
+let securityEvidence; // Collection to store Phase 2 Security Evidence Graph documents
 
 // In-Memory storage on the server for quick access to extracted files
 const extractedFilesStore = new Map();
@@ -119,6 +123,22 @@ async function startServer() {
   users = db.collection('users');
   oauthAccounts = db.collection('oauthAccounts');
   analysisResults = db.collection('analysisResults');
+  semanticChunks = db.collection('semantic_chunks');
+  securityEvidence = db.collection('security_evidence');
+
+  try {
+    await semanticChunks.createIndex({ analysisId: 1, filePath: 1, chunkIndex: 1 }, { unique: true });
+    await semanticChunks.createIndex({ chunkId: 1 }, { unique: true });
+  } catch (idxErr) {
+    console.warn('Notice while setting up semantic_chunks collection indexes:', idxErr.message);
+  }
+
+  try {
+    await securityEvidence.createIndex({ analysisId: 1, chunkId: 1 }, { unique: true });
+    await securityEvidence.createIndex({ analysisId: 1, filePath: 1 });
+  } catch (idxErr) {
+    console.warn('Notice while setting up security_evidence collection indexes:', idxErr.message);
+  }
 
   app.use(
     cors({
@@ -481,16 +501,19 @@ OUTPUT FORMAT REQUIREMENT:
         }
       }
 
-      // Deduplicate final extracted list
-      extractedFiles = [...new Set(extractedFiles)];
+      // Deduplicate final extracted list & resolve to full relative repo paths
+      extractedFiles = [...new Set(extractedFiles)].map((fileName) => {
+        const matchingPath = nonIgnoredPaths.find((p) => p.endsWith(`/${fileName}`) || p === fileName);
+        return matchingPath || fileName;
+      });
 
       // 7. Log output
-      console.log('\n==================================================');
-      console.log(`[EXTRACTED CORE FILE NAMES FOR]: ${repoMetadata.fullName}`);
-      console.log(`[TOTAL EXTRACTED FILE NAMES]: ${extractedFiles.length}`);
-      console.log('==================================================');
+      console.log('\n================================================================================');
+      console.log(`[EXTRACTED CORE FILES FOR]: ${repoMetadata.fullName}`);
+      console.log(`[TOTAL EXTRACTED FILES]:    ${extractedFiles.length}`);
+      console.log('================================================================================');
       console.log(JSON.stringify(extractedFiles, null, 2));
-      console.log('==================================================\n');
+      console.log('================================================================================\n');
 
       const analysisId = `analysis_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
@@ -506,6 +529,7 @@ OUTPUT FORMAT REQUIREMENT:
         fileNamesPassedToModel: fileNamesList.length,
         extractedFilesCount: extractedFiles.length,
         extractedFiles,
+        chunkingStatus: 'PENDING',
         updatedAt: new Date(),
       };
 
@@ -519,6 +543,17 @@ OUTPUT FORMAT REQUIREMENT:
         },
         { upsert: true }
       );
+
+      // 9. AUTOMATICALLY TRIGGER SEMANTIC CHUNKING SERVICE IMMEDIATELY AS FILES ARE ADDED
+      console.log(`🚀 [AUTOMATIC CHUNKING TRIGGERED] Starting Semantic Chunking Pipeline for ${repoMetadata.fullName}...`);
+      SemanticChunkingService.processAnalysis(db, analysisId, {
+        accessToken: oauthAcc.accessToken,
+        owner,
+        repoName,
+        defaultBranch
+      }).catch((chunkErr) => {
+        console.error(`❌ [Background Semantic Chunking Error] Pipeline failed for ${analysisId}:`, chunkErr);
+      });
 
       res.json({
         success: true,
@@ -585,6 +620,240 @@ OUTPUT FORMAT REQUIREMENT:
     } catch (err) {
       console.error('Error fetching repository analysis:', err);
       res.status(500).json({ error: 'Failed to retrieve repository analysis record' });
+    }
+  });
+
+  // POST ENDPOINT: Trigger backend-only Semantic Chunking pipeline for an analysis ID
+  app.post('/api/chunking/process/:analysisId', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { analysisId } = req.params;
+    const { options } = req.body || {};
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) {
+        return res.status(404).json({ error: 'Analysis record not found' });
+      }
+
+      // Trigger background semantic chunking process asynchronously
+      SemanticChunkingService.processAnalysis(db, analysisId, options).catch((err) => {
+        console.error(`[Background Chunking Error] Pipeline failed for ${analysisId}:`, err);
+      });
+
+      res.json({
+        success: true,
+        message: `Semantic chunking pipeline triggered for analysis ${analysisId}`,
+        analysisId,
+        status: 'IN_PROGRESS'
+      });
+    } catch (err) {
+      console.error('Error triggering semantic chunking pipeline:', err);
+      res.status(500).json({ error: 'Failed to trigger semantic chunking pipeline' });
+    }
+  });
+
+  // GET ENDPOINT: Retrieve live chunking status & progress for an analysis
+  app.get('/api/chunking/status/:analysisId', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) {
+        return res.status(404).json({ error: 'Analysis record not found' });
+      }
+
+      res.json({
+        success: true,
+        analysisId,
+        chunkingStatus: record.chunkingStatus || 'NOT_STARTED',
+        totalFilesToChunk: record.totalFilesToChunk || record.extractedFilesCount || 0,
+        processedFiles: record.processedFiles || 0,
+        completedFiles: record.completedFiles || 0,
+        failedFiles: record.failedFiles || 0,
+        totalChunks: record.totalChunks || 0,
+        lastChunkedAt: record.lastChunkedAt || null,
+        fileProgress: record.fileProgress || {}
+      });
+    } catch (err) {
+      console.error('Error fetching chunking status:', err);
+      res.status(500).json({ error: 'Failed to retrieve chunking status' });
+    }
+  });
+
+  // GET ENDPOINT: Fetch generated semantic chunks from semantic_chunks collection
+  app.get('/api/chunking/chunks/:analysisId', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { analysisId } = req.params;
+    const { filePath, limit = 100, skip = 0 } = req.query;
+
+    try {
+      const filter = { analysisId };
+      if (filePath) {
+        filter.filePath = filePath;
+      }
+
+      const parsedLimit = Math.min(500, parseInt(limit, 10) || 100);
+      const parsedSkip = Math.max(0, parseInt(skip, 10) || 0);
+
+      const chunks = await semanticChunks
+        .find(filter)
+        .sort({ filePath: 1, chunkIndex: 1 })
+        .skip(parsedSkip)
+        .limit(parsedLimit)
+        .toArray();
+
+      const totalCount = await semanticChunks.countDocuments(filter);
+
+      res.json({
+        success: true,
+        analysisId,
+        totalChunks: totalCount,
+        count: chunks.length,
+        skip: parsedSkip,
+        limit: parsedLimit,
+        chunks
+      });
+    } catch (err) {
+      console.error('Error fetching semantic chunks:', err);
+      res.status(500).json({ error: 'Failed to retrieve semantic chunks' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PHASE 2: SENTINELAI SECURITY EVIDENCE EXTRACTION ENGINE ENDPOINTS
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // POST ENDPOINT: Manually trigger Phase 2 evidence extraction for an analysisId
+  app.post('/api/evidence/process/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const chunkCount = await semanticChunks.countDocuments({ analysisId });
+      if (chunkCount === 0) {
+        return res.status(400).json({ error: 'No semantic chunks found for this analysis. Run chunking first.' });
+      }
+
+      // Trigger Phase 2 in background
+      EvidenceExtractionService.processAnalysisEvidence(db, analysisId).catch((err) => {
+        console.error(`❌ [Phase 2 Manual Trigger Error] ${analysisId}:`, err.message);
+      });
+
+      res.json({
+        success: true,
+        message: `SentinelAI Phase 2 evidence extraction triggered for ${analysisId}`,
+        analysisId,
+        chunksQueued: chunkCount,
+        phase2Status: 'IN_PROGRESS'
+      });
+    } catch (err) {
+      console.error('Error triggering Phase 2 evidence extraction:', err);
+      res.status(500).json({ error: 'Failed to trigger Phase 2 evidence extraction' });
+    }
+  });
+
+  // GET ENDPOINT: Live Phase 2 evidence extraction status & node/edge counts
+  app.get('/api/evidence/status/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const totalChunks = await semanticChunks.countDocuments({ analysisId });
+      const completedChunks = await semanticChunks.countDocuments({ analysisId, evidenceExtracted: true });
+      const failedChunks = await semanticChunks.countDocuments({ analysisId, status: 'FAILED' });
+      const totalEvidenceDocs = await securityEvidence.countDocuments({ analysisId });
+
+      res.json({
+        success: true,
+        analysisId,
+        phase2Status: record.phase2Status || 'NOT_STARTED',
+        totalChunks,
+        completedChunks,
+        failedChunks,
+        totalEvidenceDocuments: totalEvidenceDocs,
+        extractedNodesCount: record.extractedEvidenceCount || 0,
+        extractedEdgesCount: record.extractedEdgesCount || 0,
+        frameworks: record.evidenceGraph?.frameworks || [],
+        lastPhase2StartedAt: record.lastPhase2StartedAt || null,
+        lastPhase2CompletedAt: record.lastPhase2CompletedAt || null
+      });
+    } catch (err) {
+      console.error('Error fetching Phase 2 status:', err);
+      res.status(500).json({ error: 'Failed to retrieve Phase 2 evidence status' });
+    }
+  });
+
+  // GET ENDPOINT: Return full aggregated Security Evidence Graph (nodes + edges)
+  app.get('/api/evidence/graph/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+    const { filePath, nodeType, limit = 200, skip = 0 } = req.query;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      // Build evidence query filter for per-chunk evidence docs
+      const filter = { analysisId };
+      if (filePath) filter.filePath = filePath;
+
+      const parsedLimit = Math.min(500, parseInt(limit, 10) || 200);
+      const parsedSkip = Math.max(0, parseInt(skip, 10) || 0);
+
+      const evidenceDocs = await securityEvidence
+        .find(filter, { projection: { nodes: 1, edges: 1, filePath: 1, language: 1, frameworks: 1, chunkId: 1, chunkIndex: 1 } })
+        .sort({ filePath: 1, chunkIndex: 1 })
+        .skip(parsedSkip)
+        .limit(parsedLimit)
+        .toArray();
+
+      // Flatten nodes and edges from evidence docs, optionally filter by nodeType
+      let allNodes = [];
+      let allEdges = [];
+
+      for (const doc of evidenceDocs) {
+        let docNodes = Array.isArray(doc.nodes) ? doc.nodes : [];
+        if (nodeType) {
+          docNodes = docNodes.filter((n) => n.type === nodeType.toUpperCase());
+        }
+        allNodes.push(...docNodes);
+        allEdges.push(...(Array.isArray(doc.edges) ? doc.edges : []));
+      }
+
+      res.json({
+        success: true,
+        analysisId,
+        phase2Status: record.phase2Status || 'NOT_STARTED',
+        frameworks: record.evidenceGraph?.frameworks || [],
+        totalNodesReturned: allNodes.length,
+        totalEdgesReturned: allEdges.length,
+        skip: parsedSkip,
+        limit: parsedLimit,
+        nodes: allNodes,
+        edges: allEdges
+      });
+    } catch (err) {
+      console.error('Error fetching Security Evidence Graph:', err);
+      res.status(500).json({ error: 'Failed to retrieve Security Evidence Graph' });
     }
   });
 
