@@ -28,6 +28,9 @@ passport.serializeUser((user, done) => {
 
 passport.deserializeUser(async (id, done) => {
   try {
+    if (!ObjectId.isValid(id)) {
+      return done(null, null);
+    }
     const user = await users.findOne({ _id: new ObjectId(id) });
     done(null, user || null);
   } catch (err) {
@@ -66,8 +69,8 @@ passport.use(
           { upsert: true, returnDocument: 'after' }
         );
 
-        let user = upsertResult.value;
-        if (!user) {
+        let user = upsertResult?.value || upsertResult;
+        if (!user || !user._id) {
           user = await users.findOne({ githubId });
         }
 
@@ -122,11 +125,13 @@ async function startServer() {
         client: client,
         dbName: 'exodus',
         collectionName: 'sessions',
+        touchAfter: 24 * 3600, // only update session in DB once per day unless data changes
       }),
       cookie: {
         secure: false,
         httpOnly: true,
         sameSite: 'lax',
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours — expires on browser close if omitted, which can persist
       },
     })
   );
@@ -134,7 +139,18 @@ async function startServer() {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  app.get('/api/auth/github', passport.authenticate('github'));
+  // Force GitHub to show the login screen every time (prevents silent re-auth after logout)
+  app.get(
+    '/api/auth/github',
+    (req, res, next) => {
+      // Regenerate session before starting OAuth to prevent session fixation
+      req.session.regenerate((err) => {
+        if (err) return next(err);
+        next();
+      });
+    },
+    passport.authenticate('github', { session: true })
+  );
 
   app.get(
     '/api/auth/github/callback',
@@ -143,9 +159,64 @@ async function startServer() {
       session: true,
     }),
     (req, res) => {
-      res.redirect(`${FRONTEND_URL}/dashboard`);
+      // Regenerate the session after login to prevent session fixation.
+      // This is especially important after a switch-account flow where the
+      // old session was destroyed and a new OAuth login just completed.
+      req.session.regenerate((err) => {
+        if (err) {
+          console.error('Session regeneration error after GitHub callback:', err);
+          // Still redirect to dashboard; Passport already set req.user
+        }
+        // Re-save the logged-in user into the newly regenerated session
+        req.session.passport = { user: req.user._id.toString() };
+        req.session.save((saveErr) => {
+          if (saveErr) console.error('Session save error after regeneration:', saveErr);
+          res.redirect(`${FRONTEND_URL}/dashboard`);
+        });
+      });
     }
   );
+
+  // Switch account: destroy existing session then start a fresh GitHub OAuth flow.
+  // Passing `prompt=select_account` (recognized by some IdPs) and an empty `login`
+  // param forces GitHub to display its login/account-picker UI instead of silently
+  // reusing the currently-active browser session.
+  app.get('/api/auth/switch', (req, res, next) => {
+    const sessionId = req.session?.id;
+
+    const startOAuth = () => {
+      // `login=` (empty) clears GitHub's remembered account hint.
+      // GitHub does not officially support `prompt=`, but including it
+      // signals intent and may be honoured in future GitHub versions.
+      const githubOAuthURL =
+        `https://github.com/login/oauth/authorize` +
+        `?client_id=${process.env.GITHUB_CLIENT_ID}` +
+        `&redirect_uri=${encodeURIComponent(`${BASE_URL}/api/auth/github/callback`)}` +
+        `&scope=user%3Aemail` +
+        `&login=` +            // empty login hint forces account picker
+        `&prompt=select_account`; // belt-and-suspenders for future compatibility
+      res.redirect(githubOAuthURL);
+    };
+
+    if (!req.session) {
+      return startOAuth();
+    }
+
+    req.logout((err) => {
+      if (err) console.error('Switch-account logout error:', err);
+      req.session.destroy(async () => {
+        if (sessionId) {
+          try {
+            await db.collection('sessions').deleteOne({ _id: sessionId });
+          } catch (e) {
+            console.error('Failed to delete session from DB during switch:', e);
+          }
+        }
+        res.clearCookie('connect.sid', { path: '/' });
+        startOAuth();
+      });
+    });
+  });
 
   app.get('/api/auth/user', (req, res) => {
     if (!req.user) {
@@ -159,12 +230,32 @@ async function startServer() {
   });
 
   app.post('/api/auth/logout', (req, res, next) => {
+    const sessionId = req.session?.id;
+
     req.logout((err) => {
       if (err) return next(err);
-      req.session.destroy(() => {
-        res.clearCookie('connect.sid');
-        res.json({ success: true });
-      });
+
+      const finish = () => {
+        res.clearCookie('connect.sid', { path: '/' });
+        return res.json({ success: true });
+      };
+
+      if (req.session) {
+        req.session.destroy(async (err) => {
+          if (err) console.error('Session destroy error:', err);
+          // Also explicitly remove from MongoDB store in case destroy didn't propagate
+          if (sessionId) {
+            try {
+              await db.collection('sessions').deleteOne({ _id: sessionId });
+            } catch (e) {
+              console.error('Failed to delete session from DB:', e);
+            }
+          }
+          finish();
+        });
+      } else {
+        finish();
+      }
     });
   });
 

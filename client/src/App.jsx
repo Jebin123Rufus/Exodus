@@ -3,6 +3,7 @@ import { getCurrentUser, logout } from './services/api';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
 import './App.css';
+import './pages/LoginPage.css';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -14,12 +15,23 @@ function App() {
         const data = await getCurrentUser();
         if (data.authenticated) {
           setUser(data.user);
+          // Ensure URL reflects dashboard when authenticated
+          if (window.location.pathname !== '/dashboard') {
+            window.history.replaceState({}, '', '/dashboard');
+          }
         } else {
           setUser(null);
+          // Redirect away from /dashboard if not authenticated
+          if (window.location.pathname === '/dashboard') {
+            window.history.replaceState({}, '', '/');
+          }
         }
       } catch (error) {
         console.error('Failed to load user:', error);
         setUser(null);
+        if (window.location.pathname === '/dashboard') {
+          window.history.replaceState({}, '', '/');
+        }
       } finally {
         setLoading(false);
       }
@@ -31,16 +43,21 @@ function App() {
   const handleLogout = async () => {
     try {
       await logout();
-      setUser(null);
+      // Hard redirect — wipes all React state and forces a fresh /api/auth/user check
+      window.location.replace('/');
     } catch (error) {
       console.error('Logout failed:', error);
+      // Force reload even on failure to ensure UI reflects logged-out state
+      window.location.replace('/');
     }
   };
 
   if (loading) {
     return (
-      <div className="app-container">
-        <p>Loading...</p>
+      <div className="page-container">
+        <div className="card">
+          <p>Loading…</p>
+        </div>
       </div>
     );
   }

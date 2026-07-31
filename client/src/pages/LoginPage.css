@@ -3,29 +3,139 @@
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: #f5f7fb;
+  width: 100%;
+  padding: 24px;
+  background-color: #f5f7fb;
 }
 
 .card {
-  background: white;
+  background: #ffffff;
   border-radius: 16px;
-  padding: 32px;
+  padding: 36px 32px;
   box-shadow: 0 16px 40px rgba(12, 40, 86, 0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
-  width: min(420px, 90vw);
+  width: min(440px, 90vw);
+  box-sizing: border-box;
+}
+
+.card h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #1a1a1a;
+}
+
+.subtitle {
+  color: #666666;
+  font-size: 0.95rem;
+  margin-bottom: 24px;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 16px 0 24px 0;
+  text-align: left;
+  width: 100%;
+  background: #f8f9fa;
+  padding: 16px;
+  border-radius: 12px;
+  box-sizing: border-box;
+}
+
+.avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 2px solid #e9ecef;
+}
+
+.user-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.user-details p {
+  font-size: 0.9rem;
+  color: #333333;
+  word-break: break-word;
 }
 
 .primary-button {
-  margin-top: 24px;
+  margin-top: 12px;
   padding: 12px 24px;
   border: none;
   border-radius: 999px;
   background: #24292f;
-  color: white;
+  color: #ffffff;
   cursor: pointer;
   font-size: 1rem;
+  font-weight: 500;
+  transition: background-color 0.2s ease;
 }
 
 .primary-button:hover {
-  opacity: 0.92;
+  background: #000000;
 }
+
+.secondary-button {
+  margin-top: 12px;
+  padding: 10px 24px;
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #24292f;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.secondary-button:hover {
+  background: #f6f8fa;
+  border-color: #0969da;
+  color: #0969da;
+}
+
+.button-group {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  width: 100%;
+}
+
+.button-group .secondary-button {
+  margin-top: 0;
+  flex: 1;
+}
+
+.logout-button {
+  flex: 1;
+  padding: 10px 24px;
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  background: #fff0f0;
+  color: #cf222e;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.logout-button:hover {
+  background: #cf222e;
+  border-color: #cf222e;
+  color: #ffffff;
+}
+

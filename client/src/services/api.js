@@ -1,15 +1,20 @@
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
 export async function getCurrentUser() {
-  const res = await fetch(`${API_BASE}/api/auth/user`, {
-    credentials: 'include',
-  });
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/user`, {
+      credentials: 'include',
+    });
 
-  if (!res.ok) {
+    if (!res.ok) {
+      return { authenticated: false };
+    }
+
+    return await res.json();
+  } catch (error) {
+    console.error('Failed to get current user:', error);
     return { authenticated: false };
   }
-
-  return res.json();
 }
 
 export async function logout() {
