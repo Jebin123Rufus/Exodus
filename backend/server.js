@@ -494,26 +494,35 @@ OUTPUT FORMAT REQUIREMENT:
 
       const analysisId = `analysis_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-      // 8. Store Record in Server Memory & MongoDB
+      // 8. Store Record in Server Memory & Upsert in MongoDB under user & repository
       const analysisRecord = {
         analysisId,
         userId: req.user._id,
         username: req.user.username,
         repoFullName: repoMetadata.fullName,
+        repoId: repoMetadata.id,
         repoMetadata,
         totalPathsReceived: rawTreeItems.length,
         fileNamesPassedToModel: fileNamesList.length,
         extractedFilesCount: extractedFiles.length,
         extractedFiles,
-        createdAt: new Date(),
+        updatedAt: new Date(),
       };
 
       extractedFilesStore.set(analysisId, analysisRecord);
-      await analysisResults.insertOne(analysisRecord);
+
+      await analysisResults.updateOne(
+        { userId: req.user._id, repoFullName: repoMetadata.fullName },
+        {
+          $set: analysisRecord,
+          $setOnInsert: { createdAt: new Date() }
+        },
+        { upsert: true }
+      );
 
       res.json({
         success: true,
-        message: `Filtered repository down to ${fileNamesList.length} non-ignored unique file names and extracted ${extractedFiles.length} key file names.`,
+        message: `Filtered repository down to ${fileNamesList.length} non-ignored unique file names and extracted ${extractedFiles.length} key file names. Saved to repository record in database.`,
         analysisId,
         totalPathsReceived: rawTreeItems.length,
         fileNamesPassedToModel: fileNamesList.length,
@@ -526,7 +535,7 @@ OUTPUT FORMAT REQUIREMENT:
     }
   });
 
-  // GET ENDPOINT: Retrieve stored analysis by ID from Server Memory or MongoDB
+  // GET ENDPOINT: Retrieve stored analysis by ID or by repository full name
   app.get('/api/analysis/:analysisId', async (req, res) => {
     if (!req.user) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -548,6 +557,34 @@ OUTPUT FORMAT REQUIREMENT:
     } catch (err) {
       console.error('Error fetching analysis record:', err);
       res.status(500).json({ error: 'Failed to retrieve analysis record' });
+    }
+  });
+
+  // GET ENDPOINT: Retrieve extracted files by repoFullName
+  app.get('/api/repos/analysis', async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { repoFullName } = req.query;
+    if (!repoFullName) {
+      return res.status(400).json({ error: 'repoFullName query parameter is required' });
+    }
+
+    try {
+      const record = await analysisResults.findOne({
+        userId: req.user._id,
+        repoFullName,
+      });
+
+      if (!record) {
+        return res.status(404).json({ error: 'No analysis found for this repository' });
+      }
+
+      res.json({ success: true, analysis: record });
+    } catch (err) {
+      console.error('Error fetching repository analysis:', err);
+      res.status(500).json({ error: 'Failed to retrieve repository analysis record' });
     }
   });
 
