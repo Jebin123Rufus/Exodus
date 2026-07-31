@@ -1,21 +1,57 @@
 import { useEffect, useState } from 'react';
+import { getCurrentUser, logout } from './services/api';
+import LoginPage from './pages/LoginPage';
+import Dashboard from './pages/Dashboard';
 import './App.css';
 
 function App() {
-  const [data, setData] = useState('');
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Fetch data from the Express backend server
-    fetch('http://localhost:5000/api/message')
-      .then((res) => res.json())
-      .then((data) => setData(data.message))
-      .catch((err) => console.error("Error fetching data:", err));
+    async function loadUser() {
+      try {
+        const data = await getCurrentUser();
+        if (data.authenticated) {
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
+      } catch (error) {
+        console.error('Failed to load user:', error);
+        setUser(null);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadUser();
   }, []);
 
+  const handleLogout = async () => {
+    try {
+      await logout();
+      setUser(null);
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="app-container">
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ textAlign: 'center', marginTop: '50px' }}>
-      <h1>React + Express Integration</h1>
-      <p>Backend Response: <strong>{data || 'Loading...'}</strong></p>
+    <div className="app-container">
+      {user ? (
+        <Dashboard user={user} onLogout={handleLogout} />
+      ) : (
+        <LoginPage />
+      )}
     </div>
   );
 }
