@@ -46,19 +46,32 @@ export async function getUserRepositories() {
   return res.json();
 }
 
-export async function submitRepositoryMetadata(repoMetadata) {
+export async function submitRepositoryMetadata(repoMetadata, reAnalyze = false) {
   const res = await fetch(`${API_BASE}/api/repos/submit`, {
     method: 'POST',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ repoMetadata }),
+    body: JSON.stringify({ repoMetadata, reAnalyze }),
   });
 
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.error || 'Failed to submit repository metadata');
+  }
+
+  return res.json();
+}
+
+export async function getRepoAnalysis(repoFullName) {
+  const res = await fetch(`${API_BASE}/api/repos/analysis?repoFullName=${encodeURIComponent(repoFullName)}`, {
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to fetch repository analysis');
   }
 
   return res.json();

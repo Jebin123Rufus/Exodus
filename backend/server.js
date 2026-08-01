@@ -417,12 +417,41 @@ async function startServer() {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { repoMetadata } = req.body;
+    const { repoMetadata, reAnalyze } = req.body;
     if (!repoMetadata || !repoMetadata.fullName) {
       return res.status(400).json({ error: 'Invalid repository metadata provided' });
     }
 
     try {
+      // Check if repository has already been analyzed and user is not explicitly requesting re-analysis
+      if (!reAnalyze) {
+        const existingAnalysis = await analysisResults.findOne({
+          userId: req.user._id,
+          repoFullName: repoMetadata.fullName,
+        });
+
+        if (existingAnalysis) {
+          const existingReport = await securityReports.findOne({ analysisId: existingAnalysis.analysisId });
+          const isReportReady = Boolean(existingReport) || existingAnalysis.phase4Status === 'COMPLETED';
+
+          console.log(`[Existing Analysis Check]: ${repoMetadata.fullName} found (ID: ${existingAnalysis.analysisId}), reportReady: ${isReportReady}`);
+
+          return res.json({
+            success: true,
+            alreadyAnalyzed: true,
+            reportReady: isReportReady,
+            analysisId: existingAnalysis.analysisId,
+            message: isReportReady
+              ? `Repository '${repoMetadata.fullName}' was previously analyzed. Redirecting to analysis dashboard...`
+              : `Analysis pipeline for '${repoMetadata.fullName}' is currently active/resumed.`,
+            totalPathsReceived: existingAnalysis.totalPathsReceived || 0,
+            fileNamesPassedToModel: existingAnalysis.fileNamesPassedToModel || 0,
+            extractedFilesCount: existingAnalysis.extractedFilesCount || 0,
+            extractedFiles: existingAnalysis.extractedFiles || [],
+          });
+        }
+      }
+
       const oauthAcc = await oauthAccounts.findOne({
         userId: req.user._id,
         provider: 'github',

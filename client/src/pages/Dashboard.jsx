@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getUserRepositories, submitRepositoryMetadata, getSecurityReport } from '../services/api';
+import { getUserRepositories, submitRepositoryMetadata, getSecurityReport, getRepoAnalysis } from '../services/api';
 import ReportDashboard from './ReportDashboard';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
@@ -17,9 +17,11 @@ function Dashboard({ user, onLogout }) {
   const [submitSuccess, setSubmitSuccess] = useState(null);
   const [submitError, setSubmitError] = useState(null);
 
-  // Live status tracking
+  // Live status tracking & existing analysis
   const [analysisStatus, setAnalysisStatus] = useState(null);
   const [viewingReportId, setViewingReportId] = useState(null);
+  const [existingAnalysisInfo, setExistingAnalysisInfo] = useState(null);
+  const [checkingExisting, setCheckingExisting] = useState(false);
 
   const handleSwitchAccount = () => {
     window.location.href = `${API_BASE}/api/auth/switch`;
@@ -54,7 +56,32 @@ function Dashboard({ user, onLogout }) {
 
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
 
-  const handleSubmitAnalysis = async () => {
+  // Check if selected repo was previously analyzed
+  useEffect(() => {
+    if (!selectedRepo) {
+      setExistingAnalysisInfo(null);
+      return;
+    }
+
+    let isMounted = true;
+    setCheckingExisting(true);
+    setExistingAnalysisInfo(null);
+
+    getRepoAnalysis(selectedRepo.fullName)
+      .then((res) => {
+        if (isMounted && res.success && res.analysis) {
+          setExistingAnalysisInfo(res.analysis);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setExistingAnalysisInfo(null);
+      })
+      .finally(() => {
+        if (isMounted) setCheckingExisting(false);
+      });
+  }, [selectedRepoId]);
+
+  const handleSubmitAnalysis = async (forceReAnalyze = false) => {
     if (!selectedRepo) return;
 
     setSubmitting(true);
@@ -62,10 +89,13 @@ function Dashboard({ user, onLogout }) {
     setSubmitError(null);
 
     try {
-      const result = await submitRepositoryMetadata(selectedRepo);
+      const result = await submitRepositoryMetadata(selectedRepo, forceReAnalyze);
       setSubmitSuccess(result);
       if (result && result.analysisId) {
         setActiveAnalysisId(result.analysisId);
+        if (result.reportReady || result.alreadyAnalyzed) {
+          setViewingReportId(result.analysisId);
+        }
       }
     } catch (err) {
       console.error('Error submitting repository metadata:', err);
@@ -80,20 +110,23 @@ function Dashboard({ user, onLogout }) {
     if (!activeAnalysisId) return;
 
     let isMounted = true;
-    const interval = setInterval(async () => {
+
+    const checkStatus = async () => {
       try {
         const statusRes = await getSecurityReport(activeAnalysisId);
         if (isMounted) {
           setAnalysisStatus(statusRes);
           if (statusRes.phase4Status === 'COMPLETED' || statusRes.reportReady) {
-            clearInterval(interval);
             setViewingReportId(activeAnalysisId);
           }
         }
       } catch (err) {
         console.warn('Polling analysis status...', err.message);
       }
-    }, 3000);
+    };
+
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
 
     return () => {
       isMounted = false;
@@ -275,19 +308,48 @@ function Dashboard({ user, onLogout }) {
                   <br />
                   Submit metadata (clone URL, default branch, access scopes) for 4-Stage Static Security Analysis.
                 </p>
-                <button
-                  className="submit-button"
-                  onClick={handleSubmitAnalysis}
-                  disabled={submitting}
-                >
-                  {submitting ? (
-                    <>
-                      <span className="spinner"></span> Submitting Metadata...
-                    </>
-                  ) : (
-                    'Submit'
-                  )}
-                </button>
+
+                {checkingExisting ? (
+                  <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+                    <span className="spinner"></span> Checking repository analysis history...
+                  </p>
+                ) : existingAnalysisInfo ? (
+                  <div style={{ marginTop: '12px', padding: '14px', background: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                    <p style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: '#1e40af' }}>
+                      ℹ️ <strong>This repository was previously analyzed.</strong> (Analysis ID: <code>{existingAnalysisInfo.analysisId}</code>)
+                    </p>
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                      <button
+                        className="submit-button"
+                        onClick={() => setViewingReportId(existingAnalysisInfo.analysisId)}
+                        style={{ backgroundColor: '#2563eb' }}
+                      >
+                        📊 View Existing Security Report
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => handleSubmitAnalysis(true)}
+                        disabled={submitting}
+                      >
+                        {submitting ? 'Re-analyzing...' : '🔄 Re-Analyze Repository'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    className="submit-button"
+                    onClick={() => handleSubmitAnalysis(false)}
+                    disabled={submitting}
+                  >
+                    {submitting ? (
+                      <>
+                        <span className="spinner"></span> Submitting Metadata...
+                      </>
+                    ) : (
+                      'Submit'
+                    )}
+                  </button>
+                )}
               </div>
             )}
 
