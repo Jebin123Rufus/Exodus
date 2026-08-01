@@ -1,0 +1,15 @@
+Team Name   : EXODUS
+Team ID     : H26DSI07
+
+College     : RAJALAKSHMI INSTITUTE OF TECHHNOLOGY
+
+Team Leader : JEBIN RUFUS R
+
+Team Members:
+1. HARSHINI A
+2. JOSHUA DANIELL A
+
+
+We are a team of passionate Computer Science students driven by a shared interest in Artificial Intelligence, Cybersecurity, and Software Engineering. Through our combined technical expertise and collaborative approach, we developed **Exodus**, an AI-powered static application security analysis platform designed to help developers identify security vulnerabilities and improve software security through intelligent, context-aware analysis.
+
+Our goal is to leverage emerging AI technologies to address real-world cybersecurity challenges by building practical, scalable, and developer-friendly solutions. Throughout this project, we focused on innovation, teamwork, and continuous learning to deliver a comprehensive security analysis platform that bridges the gap between traditional static analysis and AI-assisted security intelligence.
