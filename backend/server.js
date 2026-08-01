@@ -10,6 +10,7 @@ import Groq from 'groq-sdk';
 import ignore from 'ignore';
 import { SemanticChunkingService } from './src/chunking/semanticChunkingService.js';
 import { EvidenceExtractionService } from './src/evidence/evidenceExtractionService.js';
+import { SecurityCorrelationEngine } from './src/correlation/correlationEngine.js';
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ let oauthAccounts;
 let analysisResults; // Collection to store the extracted files output
 let semanticChunks; // Collection to store generated semantic chunks
 let securityEvidence; // Collection to store Phase 2 Security Evidence Graph documents
+let securityFindings; // Collection to store Stage 3 Security Findings documents
 
 // In-Memory storage on the server for quick access to extracted files
 const extractedFilesStore = new Map();
@@ -125,6 +127,7 @@ async function startServer() {
   analysisResults = db.collection('analysisResults');
   semanticChunks = db.collection('semantic_chunks');
   securityEvidence = db.collection('security_evidence');
+  securityFindings = db.collection('security_findings');
 
   try {
     await semanticChunks.createIndex({ analysisId: 1, filePath: 1, chunkIndex: 1 }, { unique: true });
@@ -138,6 +141,14 @@ async function startServer() {
     await securityEvidence.createIndex({ analysisId: 1, filePath: 1 });
   } catch (idxErr) {
     console.warn('Notice while setting up security_evidence collection indexes:', idxErr.message);
+  }
+
+  try {
+    await securityFindings.createIndex({ analysisId: 1, finding_id: 1 }, { unique: true });
+    await securityFindings.createIndex({ analysisId: 1, category: 1 });
+    await securityFindings.createIndex({ analysisId: 1, severity: 1 });
+  } catch (idxErr) {
+    console.warn('Notice while setting up security_findings collection indexes:', idxErr.message);
   }
 
   app.use(
@@ -854,6 +865,114 @@ OUTPUT FORMAT REQUIREMENT:
     } catch (err) {
       console.error('Error fetching Security Evidence Graph:', err);
       res.status(500).json({ error: 'Failed to retrieve Security Evidence Graph' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STAGE 3: REPOSITORY SECURITY CORRELATION ENGINE ENDPOINTS
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // POST ENDPOINT: Manually trigger Stage 3 correlation pipeline for an analysisId
+  app.post('/api/findings/process/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const evidenceCount = await securityEvidence.countDocuments({ analysisId });
+      if (evidenceCount === 0) {
+        return res.status(400).json({ error: 'No security evidence found for this analysis. Run Phase 2 evidence extraction first.' });
+      }
+
+      // Trigger Stage 3 in background
+      SecurityCorrelationEngine.processAnalysis(db, analysisId).catch((err) => {
+        console.error(`❌ [Stage 3 Manual Trigger Error] ${analysisId}:`, err.message);
+      });
+
+      res.json({
+        success: true,
+        message: `SentinelAI Stage 3 Security Correlation Engine triggered for ${analysisId}`,
+        analysisId,
+        evidenceDocumentsQueued: evidenceCount,
+        phase3Status: 'IN_PROGRESS'
+      });
+    } catch (err) {
+      console.error('Error triggering Stage 3 security correlation:', err);
+      res.status(500).json({ error: 'Failed to trigger Stage 3 security correlation' });
+    }
+  });
+
+  // GET ENDPOINT: Live Stage 3 status & findings counts by severity
+  app.get('/api/findings/status/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const totalFindings = await securityFindings.countDocuments({ analysisId });
+
+      res.json({
+        success: true,
+        analysisId,
+        phase3Status: record.phase3Status || 'NOT_STARTED',
+        totalFindings,
+        findingsBySeverity: record.findingsBySeverity || { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 },
+        lastPhase3StartedAt: record.lastPhase3StartedAt || null,
+        lastPhase3CompletedAt: record.lastPhase3CompletedAt || null
+      });
+    } catch (err) {
+      console.error('Error fetching Stage 3 status:', err);
+      res.status(500).json({ error: 'Failed to retrieve Stage 3 findings status' });
+    }
+  });
+
+  // GET ENDPOINT: Fetch complete list of findings with optional severity/category filtering & pagination
+  app.get('/api/findings/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+    const { severity, category, limit = 100, skip = 0 } = req.query;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const filter = { analysisId };
+      if (severity) filter.severity = severity.toUpperCase();
+      if (category) filter.category = category;
+
+      const parsedLimit = Math.min(500, parseInt(limit, 10) || 100);
+      const parsedSkip = Math.max(0, parseInt(skip, 10) || 0);
+
+      const findings = await securityFindings
+        .find(filter)
+        .sort({ severity: 1, confidence: -1 })
+        .skip(parsedSkip)
+        .limit(parsedLimit)
+        .toArray();
+
+      const totalCount = await securityFindings.countDocuments(filter);
+
+      res.json({
+        success: true,
+        analysisId,
+        phase3Status: record.phase3Status || 'NOT_STARTED',
+        totalFindings: totalCount,
+        count: findings.length,
+        skip: parsedSkip,
+        limit: parsedLimit,
+        findingsBySeverity: record.findingsBySeverity || {},
+        findings
+      });
+    } catch (err) {
+      console.error('Error fetching security findings:', err);
+      res.status(500).json({ error: 'Failed to retrieve security findings' });
     }
   });
 
