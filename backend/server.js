@@ -22,10 +22,6 @@ const BASE_URL = process.env.BASE_URL;
 const MONGODB_URI = process.env.MONGODB_URI;
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
-// Initialize Groq SDK
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
-});
 
 const client = new MongoClient(MONGODB_URI);
 
@@ -347,10 +343,6 @@ async function startServer() {
         finish();
       }
     });
-  });
-
-  app.get('/api/message', (req, res) => {
-    res.json({ message: 'Hello from the Express backend!' });
   });
 
   app.get('/api/repos', async (req, res) => {

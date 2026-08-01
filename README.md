@@ -214,8 +214,7 @@ backend/
 │   ├── services/
 │   └── utils/
 │
-├── server.js
-└── test/
+└── server.js
 ```
 
 ---
