@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 
 /**
- * Finding Merger & Deduplicator
- * Deduplicates findings produced by multiple reasoners so each vulnerability appears once.
+ * Finding Merger & Anti-False-Positive Filter
+ * Deduplicates raw findings from all reasoners and filters out low-confidence speculative findings.
  */
 export class FindingMerger {
   /**
@@ -10,7 +10,7 @@ export class FindingMerger {
    * 
    * @param {Array<Object>} rawFindings - List of finding objects from reasoners
    * @param {EvidenceGraph} graph - Repository Evidence Graph
-   * @returns {Array<Object>} Final deduplicated findings
+   * @returns {Array<Object>} Final deduplicated & validated findings
    */
   static mergeFindings(rawFindings, graph) {
     if (!Array.isArray(rawFindings) || rawFindings.length === 0) {
@@ -20,12 +20,28 @@ export class FindingMerger {
     const findingMap = new Map();
 
     for (const raw of rawFindings) {
-      if (!raw || !raw.title) continue;
+      if (!raw || !raw.title || typeof raw.title !== 'string') continue;
+
+      const title = raw.title.trim();
+      if (title.length < 5) continue;
 
       const category = raw.category || 'Security Misconfiguration';
-      const title = raw.title.trim();
       const affectedFiles = Array.isArray(raw.affected_files) ? raw.affected_files : [];
       const primaryFile = affectedFiles[0] || 'repository';
+
+      const computedConfidence = calculateCalculatedConfidence(raw, graph);
+
+      // FALSE POSITIVE FILTER 1: Skip low-confidence speculative findings (< 0.70)
+      if (computedConfidence < 0.70) {
+        console.log(`   ↳ 🛡️ [False Positive Filter] Discarded low-confidence finding (${computedConfidence}): "${title}"`);
+        continue;
+      }
+
+      // FALSE POSITIVE FILTER 2: Discard findings flagged as needs_more_evidence unless heavily corroborated
+      if (raw.needs_more_evidence && computedConfidence < 0.85) {
+        console.log(`   ↳ 🛡️ [False Positive Filter] Discarded incomplete finding needing more evidence: "${title}"`);
+        continue;
+      }
 
       // Hash key for deduplication
       const dedupeKey = `${category.toLowerCase()}:${title.toLowerCase()}:${primaryFile}`;
@@ -39,7 +55,7 @@ export class FindingMerger {
           title,
           description: raw.description || '',
           severity: normalizeSeverity(raw.severity),
-          confidence: calculateCalculatedConfidence(raw, graph),
+          confidence: computedConfidence,
           affected_files: [...new Set(affectedFiles)],
           evidence_node_ids: [...new Set(Array.isArray(raw.evidence_node_ids) ? raw.evidence_node_ids : [])],
           evidence_edge_ids: [...new Set(Array.isArray(raw.evidence_edge_ids) ? raw.evidence_edge_ids : [])],
@@ -55,8 +71,8 @@ export class FindingMerger {
         existing.affected_files = [...new Set([...existing.affected_files, ...affectedFiles])];
         existing.evidence_node_ids = [...new Set([...existing.evidence_node_ids, ...(raw.evidence_node_ids || [])])];
         existing.evidence_edge_ids = [...new Set([...existing.evidence_edge_ids, ...(raw.evidence_edge_ids || [])])];
-        if (typeof raw.confidence === 'number' && raw.confidence > existing.confidence) {
-          existing.confidence = raw.confidence;
+        if (computedConfidence > existing.confidence) {
+          existing.confidence = computedConfidence;
         }
         if (raw.description && raw.description.length > existing.description.length) {
           existing.description = raw.description;
@@ -104,10 +120,10 @@ function calculateCalculatedConfidence(finding, graph) {
 
   let validNodes = 0;
   for (const id of nodeIds) {
-    if (graph.nodeIndex.has(id)) validNodes++;
+    if (graph && graph.nodeIndex && graph.nodeIndex.has(id)) validNodes++;
   }
 
-  // Corroboration boost if multiple evidence nodes support the finding
+  // Corroboration bonus if multiple evidence nodes support the finding
   const corroborationBonus = validNodes > 1 ? 0.10 : 0.0;
   const finalConf = Math.min(1.0, Math.max(0.10, llmConf + corroborationBonus));
 

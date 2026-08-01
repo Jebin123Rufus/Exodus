@@ -63,3 +63,28 @@ export async function submitRepositoryMetadata(repoMetadata) {
 
   return res.json();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 4: SECURITY REPORT API HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getSecurityReport(analysisId) {
+  const res = await fetch(`${API_BASE}/api/report/${analysisId}`, {
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to fetch security report');
+  }
+
+  return res.json();
+}
+
+export function downloadReportJsonUrl(analysisId) {
+  return `${API_BASE}/api/report/${analysisId}/json`;
+}
+
+export function downloadReportMarkdownUrl(analysisId) {
+  return `${API_BASE}/api/report/${analysisId}/markdown`;
+}

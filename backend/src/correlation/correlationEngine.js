@@ -10,6 +10,7 @@ import {
   DependencyReasoner,
   BusinessLogicReasoner
 } from './reasoners/domainReasoners.js';
+import { SecurityAdvisorService } from '../advisor/securityAdvisorService.js';
 
 /**
  * SentinelAI Stage 3 - Repository Security Correlation Engine
@@ -161,6 +162,14 @@ export class SecurityCorrelationEngine {
     console.log(`🎉 [SENTINEL AI STAGE 3 COMPLETED] Status: ${finalStatus}`);
     console.log(`🛡️  Total Security Findings Identified: ${finalFindings.length}`);
     console.log(`================================================================================\n`);
+
+    // AUTOMATICALLY TRIGGER PHASE 4 - Security Advisor & Report Generation Engine
+    if (finalStatus !== 'FAILED') {
+      console.log(`🚀 [PHASE 4 AUTO-TRIGGER] Handing off findings to SentinelAI Security Advisor & Report Generator...\n`);
+      SecurityAdvisorService.processAnalysisReport(db, analysisId).catch((advErr) => {
+        console.error(`❌ [Phase 4 Background Error] Report generation failed for ${analysisId}:`, advErr.message);
+      });
+    }
 
     return {
       success: true,

@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { getUserRepositories, submitRepositoryMetadata } from '../services/api';
+import { useState, useEffect } from 'react';
+import { getUserRepositories, submitRepositoryMetadata, getSecurityReport } from '../services/api';
+import ReportDashboard from './ReportDashboard';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
@@ -12,8 +13,13 @@ function Dashboard({ user, onLogout }) {
   const [searchFilter, setSearchFilter] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
+  const [activeAnalysisId, setActiveAnalysisId] = useState(null);
   const [submitSuccess, setSubmitSuccess] = useState(null);
   const [submitError, setSubmitError] = useState(null);
+
+  // Live status tracking
+  const [analysisStatus, setAnalysisStatus] = useState(null);
+  const [viewingReportId, setViewingReportId] = useState(null);
 
   const handleSwitchAccount = () => {
     window.location.href = `${API_BASE}/api/auth/switch`;
@@ -58,6 +64,9 @@ function Dashboard({ user, onLogout }) {
     try {
       const result = await submitRepositoryMetadata(selectedRepo);
       setSubmitSuccess(result);
+      if (result && result.analysisId) {
+        setActiveAnalysisId(result.analysisId);
+      }
     } catch (err) {
       console.error('Error submitting repository metadata:', err);
       setSubmitError(err.message || 'Failed to submit repository metadata.');
@@ -65,6 +74,36 @@ function Dashboard({ user, onLogout }) {
       setSubmitting(false);
     }
   };
+
+  // Poll analysis status until Phase 4 completes
+  useEffect(() => {
+    if (!activeAnalysisId) return;
+
+    let isMounted = true;
+    const interval = setInterval(async () => {
+      try {
+        const statusRes = await getSecurityReport(activeAnalysisId);
+        if (isMounted) {
+          setAnalysisStatus(statusRes);
+          if (statusRes.phase4Status === 'COMPLETED' || statusRes.reportReady) {
+            clearInterval(interval);
+            setViewingReportId(activeAnalysisId);
+          }
+        }
+      } catch (err) {
+        console.warn('Polling analysis status...', err.message);
+      }
+    }, 3000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeAnalysisId]);
+
+  if (viewingReportId) {
+    return <ReportDashboard analysisId={viewingReportId} onBack={() => setViewingReportId(null)} />;
+  }
 
   const filteredRepos = repositories.filter((repo) =>
     repo.fullName.toLowerCase().includes(searchFilter.toLowerCase()) ||
@@ -75,7 +114,7 @@ function Dashboard({ user, onLogout }) {
     <div className="page-container">
       <div className={`card ${showRepos ? 'dashboard-card' : ''}`}>
         <h1>Welcome, {user.displayName || user.username}!</h1>
-        <p className="subtitle">You are signed in with GitHub.</p>
+        <p className="subtitle">SentinelAI Application Security Assessment Platform</p>
         <div className="profile-row">
           {user.avatarUrl && (
             <img className="avatar" src={user.avatarUrl} alt="Avatar" />
@@ -106,6 +145,44 @@ function Dashboard({ user, onLogout }) {
             Logout
           </button>
         </div>
+
+        {/* Live Multi-Stage Analysis Tracker */}
+        {activeAnalysisId && analysisStatus && (
+          <div className="status-alert success" style={{ marginTop: '20px', padding: '16px', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
+            <h3 style={{ margin: '0 0 10px 0', fontSize: '1rem', color: '#0f172a' }}>
+              ⚡ Static Security Analysis Pipeline Active ({activeAnalysisId})
+            </h3>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '0.8rem', textAlign: 'center' }}>
+              <div style={{ padding: '8px', background: analysisStatus.phase1Status === 'COMPLETED' ? '#dcfce7' : '#f1f5f9', borderRadius: '6px' }}>
+                Phase 1: Chunking<br />
+                <strong>{analysisStatus.phase1Status}</strong>
+              </div>
+              <div style={{ padding: '8px', background: analysisStatus.phase2Status === 'COMPLETED' ? '#dcfce7' : '#f1f5f9', borderRadius: '6px' }}>
+                Phase 2: Evidence<br />
+                <strong>{analysisStatus.phase2Status}</strong>
+              </div>
+              <div style={{ padding: '8px', background: analysisStatus.phase3Status === 'COMPLETED' ? '#dcfce7' : '#f1f5f9', borderRadius: '6px' }}>
+                Phase 3: Correlation<br />
+                <strong>{analysisStatus.phase3Status}</strong>
+              </div>
+              <div style={{ padding: '8px', background: analysisStatus.phase4Status === 'COMPLETED' ? '#dcfce7' : '#f1f5f9', borderRadius: '6px' }}>
+                Phase 4: Advisor<br />
+                <strong>{analysisStatus.phase4Status}</strong>
+              </div>
+            </div>
+
+            {analysisStatus.reportReady && (
+              <button
+                className="submit-button"
+                onClick={() => setViewingReportId(activeAnalysisId)}
+                style={{ marginTop: '14px', width: '100%' }}
+              >
+                📊 View Full Security Report Dashboard
+              </button>
+            )}
+          </div>
+        )}
 
         {showRepos && (
           <div className="repo-section">
@@ -196,7 +273,7 @@ function Dashboard({ user, onLogout }) {
                 <p className="submit-info-text">
                   Selected Repository: <strong>{selectedRepo.fullName}</strong>
                   <br />
-                  Submit metadata (clone URL, default branch, access scopes) to the server for Static Security Analysis.
+                  Submit metadata (clone URL, default branch, access scopes) for 4-Stage Static Security Analysis.
                 </p>
                 <button
                   className="submit-button"

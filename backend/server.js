@@ -11,6 +11,7 @@ import ignore from 'ignore';
 import { SemanticChunkingService } from './src/chunking/semanticChunkingService.js';
 import { EvidenceExtractionService } from './src/evidence/evidenceExtractionService.js';
 import { SecurityCorrelationEngine } from './src/correlation/correlationEngine.js';
+import { SecurityAdvisorService } from './src/advisor/securityAdvisorService.js';
 
 dotenv.config();
 
@@ -35,6 +36,7 @@ let analysisResults; // Collection to store the extracted files output
 let semanticChunks; // Collection to store generated semantic chunks
 let securityEvidence; // Collection to store Phase 2 Security Evidence Graph documents
 let securityFindings; // Collection to store Stage 3 Security Findings documents
+let securityReports; // Collection to store Phase 4 Security Reports documents
 
 // In-Memory storage on the server for quick access to extracted files
 const extractedFilesStore = new Map();
@@ -128,6 +130,7 @@ async function startServer() {
   semanticChunks = db.collection('semantic_chunks');
   securityEvidence = db.collection('security_evidence');
   securityFindings = db.collection('security_findings');
+  securityReports = db.collection('security_reports');
 
   try {
     await semanticChunks.createIndex({ analysisId: 1, filePath: 1, chunkIndex: 1 }, { unique: true });
@@ -149,6 +152,65 @@ async function startServer() {
     await securityFindings.createIndex({ analysisId: 1, severity: 1 });
   } catch (idxErr) {
     console.warn('Notice while setting up security_findings collection indexes:', idxErr.message);
+  }
+
+  try {
+    await securityReports.createIndex({ analysisId: 1 }, { unique: true });
+  } catch (idxErr) {
+    console.warn('Notice while setting up security_reports collection indexes:', idxErr.message);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PHASE 1 RESILIENT GROQ CALLER
+  // Rotates all 4 API keys + falls back through models — same pattern as Phase 2/3/4
+  // Prevents 401 / 429 hard failures during Phase 1 file extraction
+  // ─────────────────────────────────────────────────────────────────────────
+  async function callGroqPhase1WithFallback(messages) {
+    const keys = [
+      process.env.GROQ_API_KEY,
+      process.env.GROQ_LLAMA_PHASE_2,
+      process.env.GROQ_LLAMA_PHASE_3,
+      process.env.GROQ_LLAMA_PHASE_4
+    ].filter((k) => typeof k === 'string' && k.trim().length > 10);
+
+    const uniqueKeys = [...new Set(keys)];
+    if (uniqueKeys.length === 0) throw new Error('[Phase 1] No Groq API keys configured in .env');
+
+    const models = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-8b-8192', 'mixtral-8x7b-32768'];
+    let lastError;
+
+    for (const model of models) {
+      for (const apiKey of uniqueKeys) {
+        try {
+          const g = new Groq({ apiKey });
+          const completion = await g.chat.completions.create({
+            messages,
+            model,
+            temperature: 0.1,
+            max_completion_tokens: 2048,
+            response_format: { type: 'json_object' }
+          });
+          console.log(`   ↳ ✅ [Phase 1] File extraction LLM call succeeded (model: ${model}, key: ...${apiKey.slice(-6)})`);
+          return completion;
+        } catch (err) {
+          lastError = err;
+          const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate_limit_exceeded'));
+          const isAuthError = err.status === 401;
+          if (isRateLimit) {
+            console.warn(`   ↳ ⚠️ [Phase 1] Rate limit on ${model} key ...${apiKey.slice(-6)}. Trying next...`);
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          } else if (isAuthError) {
+            console.warn(`   ↳ ⚠️ [Phase 1] Invalid key ...${apiKey.slice(-6)} (401). Trying next key...`);
+            continue; // try next key immediately
+          } else {
+            console.warn(`   ↳ ⚠️ [Phase 1] Error on ${model}: ${err.message}. Trying next model...`);
+            break; // non-transient — try next model
+          }
+        }
+      }
+    }
+    throw lastError || new Error('[Phase 1] All Groq API keys and models exhausted during file extraction.');
   }
 
   app.use(
@@ -480,19 +542,13 @@ OUTPUT FORMAT REQUIREMENT:
 
       for (let i = 0; i < fileNamesList.length; i += MAX_BATCH_SIZE) {
         const batch = fileNamesList.slice(i, i + MAX_BATCH_SIZE);
-        const completion = await groq.chat.completions.create({
-          messages: [
-            { role: 'system', content: systemPrompt },
-            {
-              role: 'user',
-              content: `Extract essential file names from this list:\n${JSON.stringify(batch)}`,
-            },
-          ],
-          model: 'llama-3.3-70b-versatile',
-          temperature: 0.1,
-          max_completion_tokens: 4096,
-          response_format: { type: 'json_object' },
-        });
+        const completion = await callGroqPhase1WithFallback([
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: `Extract essential file names from this list:\n${JSON.stringify(batch)}`,
+          },
+        ]);
 
         const rawResponse = completion.choices[0]?.message?.content || '{}';
         try {
@@ -973,6 +1029,111 @@ OUTPUT FORMAT REQUIREMENT:
     } catch (err) {
       console.error('Error fetching security findings:', err);
       res.status(500).json({ error: 'Failed to retrieve security findings' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PHASE 4: SENTINELAI SECURITY ADVISOR & REPORT GENERATION ENDPOINTS
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // POST ENDPOINT: Manually trigger Phase 4 report generation for an analysisId
+  app.post('/api/report/process/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      // Trigger Phase 4 in background
+      SecurityAdvisorService.processAnalysisReport(db, analysisId).catch((err) => {
+        console.error(`❌ [Phase 4 Manual Trigger Error] ${analysisId}:`, err.message);
+      });
+
+      res.json({
+        success: true,
+        message: `SentinelAI Phase 4 Security Advisor report generation triggered for ${analysisId}`,
+        analysisId,
+        phase4Status: 'IN_PROGRESS'
+      });
+    } catch (err) {
+      console.error('Error triggering Phase 4 report generation:', err);
+      res.status(500).json({ error: 'Failed to trigger Phase 4 report generation' });
+    }
+  });
+
+  // GET ENDPOINT: Retrieve complete structured security report JSON + live status
+  app.get('/api/report/:analysisId', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const record = await analysisResults.findOne({ analysisId });
+      if (!record) return res.status(404).json({ error: 'Analysis record not found' });
+
+      const reportDoc = await securityReports.findOne({ analysisId });
+
+      res.json({
+        success: true,
+        analysisId,
+        repoFullName: record.repoFullName || 'Codebase',
+        phase1Status: record.status || 'COMPLETED',
+        phase2Status: record.phase2Status || 'NOT_STARTED',
+        phase3Status: record.phase3Status || 'NOT_STARTED',
+        phase4Status: record.phase4Status || 'NOT_STARTED',
+        overallSecurityScore: record.overallSecurityScore ?? reportDoc?.overallSecurityScore ?? null,
+        reportReady: Boolean(reportDoc),
+        report: reportDoc ? reportDoc.reportJson : null,
+        createdAt: record.createdAt,
+        lastPhase4CompletedAt: record.lastPhase4CompletedAt || null
+      });
+    } catch (err) {
+      console.error('Error fetching security report:', err);
+      res.status(500).json({ error: 'Failed to retrieve security report' });
+    }
+  });
+
+  // GET ENDPOINT: Download raw JSON report file
+  app.get('/api/report/:analysisId/json', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const reportDoc = await securityReports.findOne({ analysisId });
+      if (!reportDoc || !reportDoc.reportJson) {
+        return res.status(404).json({ error: 'Report not generated yet for this analysis' });
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Disposition', `attachment; filename="sentinelai_report_${analysisId}.json"`);
+      res.send(JSON.stringify(reportDoc.reportJson, null, 2));
+    } catch (err) {
+      console.error('Error downloading JSON report:', err);
+      res.status(500).json({ error: 'Failed to download JSON report' });
+    }
+  });
+
+  // GET ENDPOINT: Download raw Markdown report file
+  app.get('/api/report/:analysisId/markdown', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { analysisId } = req.params;
+
+    try {
+      const reportDoc = await securityReports.findOne({ analysisId });
+      if (!reportDoc || !reportDoc.reportMarkdown) {
+        return res.status(404).json({ error: 'Report not generated yet for this analysis' });
+      }
+
+      res.setHeader('Content-Type', 'text/markdown');
+      res.setHeader('Content-Disposition', `attachment; filename="sentinelai_report_${analysisId}.md"`);
+      res.send(reportDoc.reportMarkdown);
+    } catch (err) {
+      console.error('Error downloading Markdown report:', err);
+      res.status(500).json({ error: 'Failed to download Markdown report' });
     }
   });
 

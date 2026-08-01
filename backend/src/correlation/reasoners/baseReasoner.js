@@ -8,8 +8,23 @@ function getApiKeyPool() {
     process.env.GROQ_API_KEY,
     process.env.GROQ_LLAMA_PHASE_2
   ].filter((k) => typeof k === 'string' && k.trim().length > 10);
-
   return [...new Set(keys)];
+}
+
+/**
+ * Parses the retry-after seconds from a Groq 429 error message.
+ * Returns 0 if not found or parsing fails.
+ */
+function parseRetryAfterMs(errMessage) {
+  if (!errMessage) return 0;
+  const match = errMessage.match(/try again in\s+((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)/i);
+  if (!match) return 0;
+  const raw = match[1];
+  let totalMs = 0;
+  const h = raw.match(/(\d+)h/); if (h) totalMs += parseInt(h[1]) * 3600000;
+  const m = raw.match(/(\d+)m/); if (m) totalMs += parseInt(m[1]) * 60000;
+  const s = raw.match(/([\d.]+)s/); if (s) totalMs += parseFloat(s[1]) * 1000;
+  return Math.min(totalMs, 90000); // cap at 90s
 }
 
 // Model Fallback Hierarchy for Groq Rate Limits (429 TPD / TPM)
@@ -42,7 +57,7 @@ async function callGroqReasonerWithFallback(messages, options = {}) {
           messages,
           model: modelCandidate,
           temperature: options.temperature || 0.1,
-          max_completion_tokens: options.max_completion_tokens || 3072,
+          max_completion_tokens: options.max_completion_tokens || 1536,
           response_format: { type: 'json_object' }
         });
 
@@ -51,8 +66,14 @@ async function callGroqReasonerWithFallback(messages, options = {}) {
         lastError = err;
         const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate_limit_exceeded'));
         if (isRateLimit) {
-          console.warn(`   ↳ ⚠️ Rate limit (429) on ${modelCandidate} with key ...${apiKey.slice(-6)}. Trying next key/model...`);
-          await new Promise((r) => setTimeout(r, 400));
+          const retryAfterMs = parseRetryAfterMs(err.message);
+          if (retryAfterMs > 0) {
+            console.warn(`   ↳ ⚠️ Rate limit (429) on ${modelCandidate} key ...${apiKey.slice(-6)}. Waiting ${(retryAfterMs / 1000).toFixed(1)}s...`);
+            await new Promise((r) => setTimeout(r, retryAfterMs));
+          } else {
+            console.warn(`   ↳ ⚠️ Rate limit (429) on ${modelCandidate} key ...${apiKey.slice(-6)}. Trying next key/model...`);
+            await new Promise((r) => setTimeout(r, 300));
+          }
           continue;
         } else {
           break;
